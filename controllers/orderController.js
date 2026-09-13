@@ -15,25 +15,26 @@ function computeTotal(length_m, width_m, unit_price) {
 }
 
 async function create(req, res) {
-  const { customer_name, phone, address, glass_type_id, length_m, width_m } = req.body;
+  const { customer_name, phone, address, items } = req.body;
 
-  if (!customer_name || !phone || !glass_type_id || !length_m || !width_m) {
-    return res.status(400).json({ error: 'Champs requis manquants.' });
+  if (!customer_name || !phone) {
+    return res.status(400).json({ error: 'Nom et téléphone du client requis.' });
   }
-  if (Number(length_m) <= 0 || Number(width_m) <= 0) {
-    return res.status(400).json({ error: 'Les dimensions doivent être positives.' });
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: 'Ajoutez au moins une ligne (produit + dimensions).' });
+  }
+  for (const item of items) {
+    if (!item.glass_type_id || !item.length_m || !item.width_m) {
+      return res.status(400).json({ error: 'Chaque ligne doit avoir un produit et des dimensions.' });
+    }
+    if (Number(item.length_m) <= 0 || Number(item.width_m) <= 0) {
+      return res.status(400).json({ error: 'Les dimensions doivent être positives.' });
+    }
   }
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-
-    const glassResult = await client.query('SELECT * FROM glass_types WHERE id = $1', [glass_type_id]);
-    const glass = glassResult.rows[0];
-    if (!glass) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Produit introuvable.' });
-    }
 
     const customerResult = await client.query(
       'INSERT INTO customers (full_name, phone, address) VALUES ($1, $2, $3) RETURNING id',
@@ -41,19 +42,51 @@ async function create(req, res) {
     );
     const customerId = customerResult.rows[0].id;
 
-    const totalPrice = computeTotal(length_m, width_m, glass.price);
     const orderNumber = generateOrderNumber();
+
+    // On calcule d'abord chaque ligne (règle obligatoire : Longueur x Largeur x Prix),
+    // puis le total de la commande = somme de toutes les lignes.
+    const resolvedItems = [];
+    let totalPrice = 0;
+
+    for (const item of items) {
+      const glassResult = await client.query('SELECT * FROM glass_types WHERE id = $1', [item.glass_type_id]);
+      const glass = glassResult.rows[0];
+      if (!glass) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: `Produit introuvable (id ${item.glass_type_id}).` });
+      }
+      const lineTotal = computeTotal(item.length_m, item.width_m, glass.price);
+      totalPrice += lineTotal;
+      resolvedItems.push({
+        glass_type_id: item.glass_type_id,
+        length_m: item.length_m,
+        width_m: item.width_m,
+        unit_price: glass.price,
+        line_total: lineTotal
+      });
+    }
+    totalPrice = Math.round(totalPrice * 100) / 100;
 
     const orderResult = await client.query(
       `INSERT INTO orders
-        (order_number, customer_id, glass_type_id, length_m, width_m, unit_price, total_price, status, payment_status, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'en_attente', 'non_paye', $8)
+        (order_number, customer_id, total_price, status, payment_status, created_by)
+       VALUES ($1, $2, $3, 'en_attente', 'non_paye', $4)
        RETURNING *`,
-      [orderNumber, customerId, glass_type_id, length_m, width_m, glass.price, totalPrice, req.user.id]
+      [orderNumber, customerId, totalPrice, req.user.id]
     );
+    const order = orderResult.rows[0];
+
+    for (const item of resolvedItems) {
+      await client.query(
+        `INSERT INTO order_items (order_id, glass_type_id, length_m, width_m, unit_price, line_total)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [order.id, item.glass_type_id, item.length_m, item.width_m, item.unit_price, item.line_total]
+      );
+    }
 
     await client.query('COMMIT');
-    res.status(201).json({ order: orderResult.rows[0] });
+    res.status(201).json({ order, items: resolvedItems });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error(err);
@@ -71,11 +104,12 @@ async function list(req, res) {
   try {
     const result = await pool.query(`
       SELECT o.*, c.full_name AS customer_name, c.phone, c.address,
-             g.name AS glass_name,
-             COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.order_id = o.id), 0) AS total_paid
+             COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.order_id = o.id), 0) AS total_paid,
+             (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id) AS item_count,
+             (SELECT string_agg(g.name, ', ') FROM order_items oi
+                JOIN glass_types g ON g.id = oi.glass_type_id WHERE oi.order_id = o.id) AS glass_names
       FROM orders o
       JOIN customers c ON c.id = o.customer_id
-      JOIN glass_types g ON g.id = o.glass_type_id
       WHERE o.archived = $1
       ORDER BY o.created_at DESC
     `, [showArchived]);
@@ -91,11 +125,9 @@ async function getById(req, res) {
   try {
     const result = await pool.query(`
       SELECT o.*, c.full_name AS customer_name, c.phone, c.address,
-             g.name AS glass_name,
              COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.order_id = o.id), 0) AS total_paid
       FROM orders o
       JOIN customers c ON c.id = o.customer_id
-      JOIN glass_types g ON g.id = o.glass_type_id
       WHERE o.id = $1
     `, [id]);
 
@@ -103,11 +135,19 @@ async function getById(req, res) {
       return res.status(404).json({ error: 'Commande introuvable.' });
     }
 
+    const items = await pool.query(`
+      SELECT oi.*, g.name AS glass_name
+      FROM order_items oi
+      JOIN glass_types g ON g.id = oi.glass_type_id
+      WHERE oi.order_id = $1
+      ORDER BY oi.id ASC
+    `, [id]);
+
     const payments = await pool.query(
       'SELECT * FROM payments WHERE order_id = $1 ORDER BY created_at ASC', [id]
     );
 
-    res.json({ order: result.rows[0], payments: payments.rows });
+    res.json({ order: result.rows[0], items: items.rows, payments: payments.rows });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Erreur lors du chargement de la commande.' });

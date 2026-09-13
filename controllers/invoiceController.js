@@ -11,14 +11,21 @@ function generateInvoiceNumber() {
 
 async function getOrderFull(orderId) {
   const orderResult = await pool.query(`
-    SELECT o.*, c.full_name AS customer_name, c.phone, c.address, g.name AS glass_name
+    SELECT o.*, c.full_name AS customer_name, c.phone, c.address
     FROM orders o
     JOIN customers c ON c.id = o.customer_id
-    JOIN glass_types g ON g.id = o.glass_type_id
     WHERE o.id = $1
   `, [orderId]);
   const order = orderResult.rows[0];
   if (!order) return null;
+
+  const itemsResult = await pool.query(`
+    SELECT oi.*, g.name AS glass_name
+    FROM order_items oi
+    JOIN glass_types g ON g.id = oi.glass_type_id
+    WHERE oi.order_id = $1
+    ORDER BY oi.id ASC
+  `, [orderId]);
 
   const paidResult = await pool.query(
     'SELECT COALESCE(SUM(amount), 0) AS total_paid FROM payments WHERE order_id = $1', [orderId]
@@ -29,7 +36,7 @@ async function getOrderFull(orderId) {
   const settingsResult = await pool.query('SELECT * FROM settings ORDER BY id ASC LIMIT 1');
   const settings = settingsResult.rows[0] || { company_name: 'Fall Vitrage', phone: '', address: '' };
 
-  return { order, settings };
+  return { order, items: itemsResult.rows, settings };
 }
 
 const STATUS_LABELS = {
@@ -46,7 +53,7 @@ async function createAndDownload(req, res) {
     if (!data) {
       return res.status(404).json({ error: 'Commande introuvable.' });
     }
-    const { order, settings } = data;
+    const { order, items, settings } = data;
 
     // Enregistrer la facture en base
     const invoiceNumber = generateInvoiceNumber();
@@ -84,29 +91,52 @@ async function createAndDownload(req, res) {
 
     doc.moveDown(1);
 
-    // Détails produit
+    // Détails — une ligne par découpe (produit + dimensions), regroupées
+    // dans cette seule commande / seule facture, avec un total unique.
     doc.fontSize(12).fillColor('#0f4c81').text('Détails de la commande');
-    doc.fontSize(11).fillColor('#000');
+    doc.fontSize(10).fillColor('#000');
 
-    const tableTop = doc.y + 8;
-    doc.font('Helvetica-Bold');
-    doc.text('Produit', 50, tableTop);
-    doc.text('Dimensions', 220, tableTop);
-    doc.text('Prix unitaire', 350, tableTop);
-    doc.text('Total', 470, tableTop);
-    doc.font('Helvetica');
+    const colX = { produit: 50, dims: 230, prix: 350, total: 460 };
+    const pageBottom = 700;
 
-    const rowY = tableTop + 20;
-    doc.text(order.glass_name, 50, rowY, { width: 160 });
-    doc.text(`${order.length_m} m x ${order.width_m} m`, 220, rowY, { width: 120 });
-    doc.text(`${Number(order.unit_price).toLocaleString('fr-FR')} F`, 350, rowY, { width: 100 });
-    doc.text(`${Number(order.total_price).toLocaleString('fr-FR')} F`, 470, rowY, { width: 80 });
+    function drawTableHeader(y) {
+      doc.font('Helvetica-Bold').fontSize(10);
+      doc.text('Produit', colX.produit, y, { width: 170 });
+      doc.text('Dimensions', colX.dims, y, { width: 110 });
+      doc.text('Prix unit.', colX.prix, y, { width: 100 });
+      doc.text('Total', colX.total, y, { width: 85 });
+      doc.font('Helvetica');
+      doc.moveTo(50, y + 15).lineTo(545, y + 15).strokeColor('#ccc').stroke();
+      return y + 24;
+    }
 
-    doc.moveTo(50, rowY + 25).lineTo(545, rowY + 25).strokeColor('#ccc').stroke();
+    let y = drawTableHeader(doc.y);
+
+    items.forEach((item, index) => {
+      if (y > pageBottom) {
+        doc.addPage();
+        y = drawTableHeader(50);
+      }
+      doc.fontSize(10);
+      doc.text(item.glass_name, colX.produit, y, { width: 170 });
+      doc.text(`${item.length_m} m × ${item.width_m} m`, colX.dims, y, { width: 110 });
+      doc.text(`${Number(item.unit_price).toLocaleString('fr-FR')} F`, colX.prix, y, { width: 100 });
+      doc.text(`${Number(item.line_total).toLocaleString('fr-FR')} F`, colX.total, y, { width: 85 });
+      y += 20;
+    });
+
+    doc.moveTo(50, y + 4).lineTo(545, y + 4).strokeColor('#ccc').stroke();
+    y += 22;
+
+    if (y > pageBottom - 100) {
+      doc.addPage();
+      y = 50;
+    }
 
     // Récapitulatif paiement
-    let y = rowY + 45;
     doc.fontSize(11);
+    doc.text(`Nombre de découpes : ${items.length}`, 50, y);
+    y += 22;
     doc.text('Prix total:', 350, y);
     doc.text(`${Number(order.total_price).toLocaleString('fr-FR')} F`, 470, y);
     y += 18;

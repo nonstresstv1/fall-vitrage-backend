@@ -29,10 +29,11 @@ async function stats(req, res) {
 
     const recentOrders = await pool.query(`
       SELECT o.id, o.order_number, o.total_price, o.status, o.payment_status, o.created_at,
-             c.full_name AS customer_name, g.name AS glass_name
+             c.full_name AS customer_name,
+             (SELECT string_agg(g.name, ', ') FROM order_items oi
+                JOIN glass_types g ON g.id = oi.glass_type_id WHERE oi.order_id = o.id) AS glass_name
       FROM orders o
       JOIN customers c ON c.id = o.customer_id
-      JOIN glass_types g ON g.id = o.glass_type_id
       ORDER BY o.created_at DESC
       LIMIT 10
     `);
@@ -59,10 +60,11 @@ async function summary(req, res) {
     );
     const recentOrders = await pool.query(`
       SELECT o.id, o.order_number, o.status, o.payment_status, o.created_at,
-             c.full_name AS customer_name, g.name AS glass_name
+             c.full_name AS customer_name,
+             (SELECT string_agg(g.name, ', ') FROM order_items oi
+                JOIN glass_types g ON g.id = oi.glass_type_id WHERE oi.order_id = o.id) AS glass_name
       FROM orders o
       JOIN customers c ON c.id = o.customer_id
-      JOIN glass_types g ON g.id = o.glass_type_id
       ORDER BY o.created_at DESC
       LIMIT 10
     `);
