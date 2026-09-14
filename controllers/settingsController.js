@@ -18,13 +18,13 @@ async function update(req, res) {
     if (existing.rows.length === 0) {
       result = await pool.query(
         `INSERT INTO settings (company_name, phone, address) VALUES ($1, $2, $3) RETURNING *`,
-        [company_name || 'Fall Vitrage', phone || '', address || '']
+        [company_name || 'Darou Salam Miroir', phone || '', address || '']
       );
     } else {
       result = await pool.query(
         `UPDATE settings SET company_name = $1, phone = $2, address = $3, updated_at = NOW()
          WHERE id = $4 RETURNING *`,
-        [company_name || 'Fall Vitrage', phone || '', address || '', existing.rows[0].id]
+        [company_name || 'Darou Salam Miroir', phone || '', address || '', existing.rows[0].id]
       );
     }
     res.json({ settings: result.rows[0] });

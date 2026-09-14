@@ -1,5 +1,5 @@
 -- ============================================================
--- FALL VITRAGE - Migration initiale
+-- DAROU SALAM MIROIR - Migration initiale
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS users (
@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS payments (
 
 CREATE TABLE IF NOT EXISTS settings (
   id SERIAL PRIMARY KEY,
-  company_name VARCHAR(150) NOT NULL DEFAULT 'Fall Vitrage',
+  company_name VARCHAR(150) NOT NULL DEFAULT 'Darou Salam Miroir',
   phone VARCHAR(30),
   address VARCHAR(255),
   updated_at TIMESTAMP NOT NULL DEFAULT NOW()

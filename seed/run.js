@@ -26,7 +26,7 @@ async function seed() {
       await client.query(
         `INSERT INTO users (full_name, email, password_hash, role, is_active)
          VALUES ($1, $2, $3, 'admin', TRUE)`,
-        ['Administrateur Fall Vitrage', adminEmail, hash]
+        ['Administrateur Darou Salam Miroir', adminEmail, hash]
       );
       console.log(`Compte admin créé: ${adminEmail}`);
     } else {
@@ -51,7 +51,7 @@ async function seed() {
       await client.query(
         `INSERT INTO settings (company_name, phone, address)
          VALUES ($1, $2, $3)`,
-        ['Fall Vitrage', '', '']
+        ['Darou Salam Miroir', '', '']
       );
       console.log('Paramètres par défaut créés.');
     }

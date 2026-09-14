@@ -9,13 +9,14 @@ function generateOrderNumber() {
   return `FV-${y}${m}${d}-${rand}`;
 }
 
-// RÈGLE MÉTIER OBLIGATOIRE : Prix Total = Longueur x Largeur x Prix (jamais prix au m²)
-function computeTotal(length_m, width_m, unit_price) {
-  return Math.round(Number(length_m) * Number(width_m) * Number(unit_price) * 100) / 100;
+// RÈGLE MÉTIER OBLIGATOIRE : Prix Total ligne = Quantité x Longueur x Largeur x Prix
+// (jamais prix au m²). La quantité = nombre de pièces identiques à cette dimension.
+function computeTotal(length_m, width_m, unit_price, quantity = 1) {
+  return Math.round(Number(length_m) * Number(width_m) * Number(unit_price) * Number(quantity) * 100) / 100;
 }
 
 async function create(req, res) {
-  const { customer_name, phone, address, items } = req.body;
+  const { customer_name, phone, address, items, discount } = req.body;
 
   if (!customer_name || !phone) {
     return res.status(400).json({ error: 'Nom et téléphone du client requis.' });
@@ -30,6 +31,14 @@ async function create(req, res) {
     if (Number(item.length_m) <= 0 || Number(item.width_m) <= 0) {
       return res.status(400).json({ error: 'Les dimensions doivent être positives.' });
     }
+    const qty = item.quantity === undefined || item.quantity === null ? 1 : Number(item.quantity);
+    if (isNaN(qty) || qty <= 0) {
+      return res.status(400).json({ error: 'La quantité de chaque ligne doit être un nombre positif.' });
+    }
+  }
+  const discountValue = discount === undefined || discount === null || discount === '' ? 0 : Number(discount);
+  if (isNaN(discountValue) || discountValue < 0) {
+    return res.status(400).json({ error: 'La remise doit être un montant positif ou nul.' });
   }
 
   const client = await pool.connect();
@@ -44,10 +53,10 @@ async function create(req, res) {
 
     const orderNumber = generateOrderNumber();
 
-    // On calcule d'abord chaque ligne (règle obligatoire : Longueur x Largeur x Prix),
-    // puis le total de la commande = somme de toutes les lignes.
+    // On calcule d'abord chaque ligne (règle obligatoire : Quantité x Longueur x Largeur x Prix),
+    // puis le sous-total = somme de toutes les lignes, puis on applique la remise éventuelle.
     const resolvedItems = [];
-    let totalPrice = 0;
+    let subtotal = 0;
 
     for (const item of items) {
       const glassResult = await client.query('SELECT * FROM glass_types WHERE id = $1', [item.glass_type_id]);
@@ -56,32 +65,36 @@ async function create(req, res) {
         await client.query('ROLLBACK');
         return res.status(404).json({ error: `Produit introuvable (id ${item.glass_type_id}).` });
       }
-      const lineTotal = computeTotal(item.length_m, item.width_m, glass.price);
-      totalPrice += lineTotal;
+      const qty = item.quantity === undefined || item.quantity === null ? 1 : item.quantity;
+      const lineTotal = computeTotal(item.length_m, item.width_m, glass.price, qty);
+      subtotal += lineTotal;
       resolvedItems.push({
         glass_type_id: item.glass_type_id,
         length_m: item.length_m,
         width_m: item.width_m,
+        quantity: qty,
         unit_price: glass.price,
         line_total: lineTotal
       });
     }
-    totalPrice = Math.round(totalPrice * 100) / 100;
+    subtotal = Math.round(subtotal * 100) / 100;
+    const appliedDiscount = Math.min(Math.round(discountValue * 100) / 100, subtotal);
+    const totalPrice = Math.round((subtotal - appliedDiscount) * 100) / 100;
 
     const orderResult = await client.query(
       `INSERT INTO orders
-        (order_number, customer_id, total_price, status, payment_status, created_by)
-       VALUES ($1, $2, $3, 'en_attente', 'non_paye', $4)
+        (order_number, customer_id, total_price, status, payment_status, created_by, discount)
+       VALUES ($1, $2, $3, 'en_attente', 'non_paye', $4, $5)
        RETURNING *`,
-      [orderNumber, customerId, totalPrice, req.user.id]
+      [orderNumber, customerId, totalPrice, req.user.id, appliedDiscount]
     );
     const order = orderResult.rows[0];
 
     for (const item of resolvedItems) {
       await client.query(
-        `INSERT INTO order_items (order_id, glass_type_id, length_m, width_m, unit_price, line_total)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [order.id, item.glass_type_id, item.length_m, item.width_m, item.unit_price, item.line_total]
+        `INSERT INTO order_items (order_id, glass_type_id, length_m, width_m, quantity, unit_price, line_total)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [order.id, item.glass_type_id, item.length_m, item.width_m, item.quantity, item.unit_price, item.line_total]
       );
     }
 

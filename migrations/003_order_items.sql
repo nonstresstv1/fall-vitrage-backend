@@ -1,5 +1,5 @@
 -- ============================================================
--- FALL VITRAGE - Migration 003
+-- DAROU SALAM MIROIR - Migration 003
 -- Permet à une commande de contenir PLUSIEURS lignes (produit +
 -- dimensions), pour regrouper plusieurs découpes d'un même client
 -- dans une seule commande / une seule facture avec un total unique.

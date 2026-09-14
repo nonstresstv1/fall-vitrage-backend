@@ -1,5 +1,5 @@
 -- ============================================================
--- FALL VITRAGE - Migration 002
+-- DAROU SALAM MIROIR - Migration 002
 -- Ajoute la possibilité de masquer (archiver) une commande de
 -- l'historique sans la supprimer, + prépare la suppression définitive.
 -- ============================================================

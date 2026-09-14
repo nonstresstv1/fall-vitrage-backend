@@ -13,14 +13,11 @@ const invoiceRoutes = require('./routes/invoiceRoutes');
 
 const app = express();
 
-app.use(cors({
-  origin: process.env.FRONTEND_URL || '*',
-  credentials: true
-}));
+app.use(cors());
 app.use(express.json());
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Fall Vitrage API' });
+  res.json({ status: 'ok', service: 'Darou Salam Miroir API' });
 });
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
@@ -44,5 +41,5 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
-  console.log(`Fall Vitrage API démarrée sur le port ${PORT}`);
+  console.log(`Darou Salam Miroir API démarrée sur le port ${PORT}`);
 });
