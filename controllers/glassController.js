@@ -11,12 +11,48 @@ const DEFAULT_PRODUCTS = [
   'Stopsol bronze 5 mm'
 ];
 
+// Cache mémoire : dès que les prix ont été chargés une fois, /products
+// répond instantanément (plus d'attente à chaque visite de commande).
+let cachedProducts = null;
+let refreshPromise = null;
+
+async function loadFromDb() {
+  const result = await pool.query(
+    'SELECT id, name, price, is_active FROM glass_types WHERE is_active = TRUE ORDER BY id ASC'
+  );
+  cachedProducts = result.rows.map(r => ({
+    id: r.id,
+    name: r.name,
+    price: Number(r.price),
+    is_active: r.is_active
+  }));
+  return cachedProducts;
+}
+
+// Rafraîchit le cache en arrière-plan sans bloquer la réponse.
+function refreshInBackground() {
+  if (refreshPromise) return refreshPromise;
+  refreshPromise = loadFromDb()
+    .catch(() => { cachedProducts = null; })
+    .finally(() => { refreshPromise = null; });
+  return refreshPromise;
+}
+
+// Réchauffe le cache au démarrage du serveur.
+function warm() {
+  refreshInBackground();
+}
+
 async function list(req, res) {
+  // Réponse immédiate dès qu'un cache est disponible.
+  if (cachedProducts) {
+    refreshInBackground();
+    return res.json({ products: cachedProducts });
+  }
+
   try {
-    const result = await pool.query(
-      'SELECT id, name, price, is_active FROM glass_types WHERE is_active = TRUE ORDER BY id ASC'
-    );
-    res.json({ products: result.rows });
+    const products = await loadFromDb();
+    res.json({ products });
   } catch (err) {
     console.error(err);
     // Secours : renvoyer la liste par défaut sans prix pour ne jamais bloquer l'UI
@@ -43,6 +79,11 @@ async function updatePrice(req, res) {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Produit introuvable.' });
     }
+    // Met à jour le cache immédiatement pour ne pas servir un ancien prix.
+    if (cachedProducts) {
+      const c = cachedProducts.find(p => Number(p.id) === Number(id));
+      if (c) c.price = Number(price);
+    }
     res.json({ product: result.rows[0] });
   } catch (err) {
     console.error(err);
@@ -50,4 +91,4 @@ async function updatePrice(req, res) {
   }
 }
 
-module.exports = { list, updatePrice, DEFAULT_PRODUCTS };
+module.exports = { list, updatePrice, DEFAULT_PRODUCTS, warm };

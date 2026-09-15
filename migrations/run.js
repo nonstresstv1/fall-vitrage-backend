@@ -3,7 +3,7 @@ const path = require('path');
 const pool = require('../config/db');
 
 async function runMigrations() {
-const files = ['001_init.sql', '002_archive_orders.sql', '003_order_items.sql', '004_password_reset.sql', '005_quantity_discount.sql'];
+const files = ['001_init.sql', '002_archive_orders.sql', '003_order_items.sql', '004_password_reset.sql', '005_quantity_discount.sql', '006_hardware_products.sql', '007_discount_type.sql'];
   try {
     for (const file of files) {
       const filePath = path.join(__dirname, file);

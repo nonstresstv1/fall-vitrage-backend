@@ -10,6 +10,8 @@ const dashboardRoutes = require('./routes/dashboardRoutes');
 const settingsRoutes = require('./routes/settingsRoutes');
 const employeeRoutes = require('./routes/employeeRoutes');
 const invoiceRoutes = require('./routes/invoiceRoutes');
+const hardwareRoutes = require('./routes/hardwareRoutes');
+const { warm: warmGlassProducts } = require('./controllers/glassController');
 
 const app = express();
 
@@ -29,6 +31,7 @@ app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/employees', employeeRoutes);
 app.use('/api/invoices', invoiceRoutes);
+app.use('/api/hardware', hardwareRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Route introuvable.' });
@@ -42,4 +45,7 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Darou Salam Miroir API démarrée sur le port ${PORT}`);
+  // Réchauffe le cache des prix des verres dès le démarrage pour que les
+  // prix s'affichent immédiatement à la première page "Nouvelle commande".
+  warmGlassProducts();
 });

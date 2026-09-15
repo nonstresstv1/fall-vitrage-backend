@@ -16,30 +16,45 @@ function computeTotal(length_m, width_m, unit_price, quantity = 1) {
 }
 
 async function create(req, res) {
-  const { customer_name, phone, address, items, discount } = req.body;
+  const { customer_name, phone, address, items, hardware_items, discount, discount_type } = req.body;
 
   if (!customer_name || !phone) {
     return res.status(400).json({ error: 'Nom et téléphone du client requis.' });
   }
-  if (!Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ error: 'Ajoutez au moins une ligne (produit + dimensions).' });
+  const hasGlassItems = Array.isArray(items) && items.length > 0;
+  const hasHardwareItems = Array.isArray(hardware_items) && hardware_items.length > 0;
+  if (!hasGlassItems && !hasHardwareItems) {
+    return res.status(400).json({ error: 'Ajoutez au moins une ligne (verre ou quincaillerie).' });
   }
-  for (const item of items) {
-    if (!item.glass_type_id || !item.length_m || !item.width_m) {
-      return res.status(400).json({ error: 'Chaque ligne doit avoir un produit et des dimensions.' });
+  if (hasGlassItems) {
+    for (const item of items) {
+      if (!item.glass_type_id || !item.length_m || !item.width_m) {
+        return res.status(400).json({ error: 'Chaque ligne de verre doit avoir un produit et des dimensions.' });
+      }
+      if (Number(item.length_m) <= 0 || Number(item.width_m) <= 0) {
+        return res.status(400).json({ error: 'Les dimensions doivent être positives.' });
+      }
+      const qty = item.quantity === undefined || item.quantity === null ? 1 : Number(item.quantity);
+      if (isNaN(qty) || qty <= 0) {
+        return res.status(400).json({ error: 'La quantité de chaque ligne doit être un nombre positif.' });
+      }
     }
-    if (Number(item.length_m) <= 0 || Number(item.width_m) <= 0) {
-      return res.status(400).json({ error: 'Les dimensions doivent être positives.' });
-    }
-    const qty = item.quantity === undefined || item.quantity === null ? 1 : Number(item.quantity);
-    if (isNaN(qty) || qty <= 0) {
-      return res.status(400).json({ error: 'La quantité de chaque ligne doit être un nombre positif.' });
+  }
+  if (hasHardwareItems) {
+    for (const hItem of hardware_items) {
+      if (!hItem.hardware_product_id || !hItem.quantity) {
+        return res.status(400).json({ error: 'Chaque ligne de quincaillerie doit avoir un produit et une quantité.' });
+      }
+      if (Number(hItem.quantity) <= 0) {
+        return res.status(400).json({ error: 'La quantité de quincaillerie doit être positive.' });
+      }
     }
   }
   const discountValue = discount === undefined || discount === null || discount === '' ? 0 : Number(discount);
   if (isNaN(discountValue) || discountValue < 0) {
     return res.status(400).json({ error: 'La remise doit être un montant positif ou nul.' });
   }
+  const discountType = ['all', 'verre', 'quincaillerie'].includes(discount_type) ? discount_type : 'all';
 
   const client = await pool.connect();
   try {
@@ -53,40 +68,72 @@ async function create(req, res) {
 
     const orderNumber = generateOrderNumber();
 
-    // On calcule d'abord chaque ligne (règle obligatoire : Quantité x Longueur x Largeur x Prix),
-    // puis le sous-total = somme de toutes les lignes, puis on applique la remise éventuelle.
     const resolvedItems = [];
-    let subtotal = 0;
+    const resolvedHardwareItems = [];
+    let glassSubtotal = 0;
+    let hardwareSubtotal = 0;
 
-    for (const item of items) {
-      const glassResult = await client.query('SELECT * FROM glass_types WHERE id = $1', [item.glass_type_id]);
-      const glass = glassResult.rows[0];
-      if (!glass) {
-        await client.query('ROLLBACK');
-        return res.status(404).json({ error: `Produit introuvable (id ${item.glass_type_id}).` });
+    if (hasGlassItems) {
+      for (const item of items) {
+        const glassResult = await client.query('SELECT * FROM glass_types WHERE id = $1', [item.glass_type_id]);
+        const glass = glassResult.rows[0];
+        if (!glass) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ error: `Produit introuvable (id ${item.glass_type_id}).` });
+        }
+        const qty = item.quantity === undefined || item.quantity === null ? 1 : item.quantity;
+        const lineTotal = computeTotal(item.length_m, item.width_m, glass.price, qty);
+        glassSubtotal += lineTotal;
+        resolvedItems.push({
+          glass_type_id: item.glass_type_id,
+          length_m: item.length_m,
+          width_m: item.width_m,
+          quantity: qty,
+          unit_price: glass.price,
+          line_total: lineTotal
+        });
       }
-      const qty = item.quantity === undefined || item.quantity === null ? 1 : item.quantity;
-      const lineTotal = computeTotal(item.length_m, item.width_m, glass.price, qty);
-      subtotal += lineTotal;
-      resolvedItems.push({
-        glass_type_id: item.glass_type_id,
-        length_m: item.length_m,
-        width_m: item.width_m,
-        quantity: qty,
-        unit_price: glass.price,
-        line_total: lineTotal
-      });
     }
-    subtotal = Math.round(subtotal * 100) / 100;
-    const appliedDiscount = Math.min(Math.round(discountValue * 100) / 100, subtotal);
+
+    if (hasHardwareItems) {
+      for (const hItem of hardware_items) {
+        const hwResult = await client.query('SELECT * FROM hardware_products WHERE id = $1 AND is_active = TRUE', [hItem.hardware_product_id]);
+        const hw = hwResult.rows[0];
+        if (!hw) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ error: `Produit de quincaillerie introuvable (id ${hItem.hardware_product_id}).` });
+        }
+        const qty = Number(hItem.quantity);
+        const unitPrice = Number(hw.selling_price);
+        const lineTotal = Math.round(qty * unitPrice * 100) / 100;
+        hardwareSubtotal += lineTotal;
+        resolvedHardwareItems.push({
+          hardware_product_id: hw.id,
+          quantity: qty,
+          unit: hItem.unit || hw.unit,
+          unit_price: unitPrice,
+          line_total: lineTotal
+        });
+      }
+    }
+
+    const subtotal = Math.round((glassSubtotal + hardwareSubtotal) * 100) / 100;
+    // La remise est plafonnée au sous-total de la catégorie choisie :
+    // 'all' => toute la commande, 'verre' => verres seuls,
+    // 'quincaillerie' => quincaillerie seule.
+    let discountMax = subtotal;
+    if (discountType === 'verre') discountMax = glassSubtotal;
+    else if (discountType === 'quincaillerie') discountMax = hardwareSubtotal;
+    discountMax = Math.round(discountMax * 100) / 100;
+    const appliedDiscount = Math.min(Math.round(discountValue * 100) / 100, discountMax);
     const totalPrice = Math.round((subtotal - appliedDiscount) * 100) / 100;
 
     const orderResult = await client.query(
       `INSERT INTO orders
-        (order_number, customer_id, total_price, status, payment_status, created_by, discount)
-       VALUES ($1, $2, $3, 'en_attente', 'non_paye', $4, $5)
+        (order_number, customer_id, total_price, status, payment_status, created_by, discount, discount_type)
+       VALUES ($1, $2, $3, 'en_attente', 'non_paye', $4, $5, $6)
        RETURNING *`,
-      [orderNumber, customerId, totalPrice, req.user.id, appliedDiscount]
+      [orderNumber, customerId, totalPrice, req.user.id, appliedDiscount, discountType]
     );
     const order = orderResult.rows[0];
 
@@ -98,8 +145,21 @@ async function create(req, res) {
       );
     }
 
+    for (const hItem of resolvedHardwareItems) {
+      await client.query(
+        `INSERT INTO order_hardware_items (order_id, hardware_product_id, quantity, unit, unit_price, line_total)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [order.id, hItem.hardware_product_id, hItem.quantity, hItem.unit, hItem.unit_price, hItem.line_total]
+      );
+      // Décrémenter le stock
+      await client.query(
+        'UPDATE hardware_products SET stock_quantity = stock_quantity - $1, updated_at = NOW() WHERE id = $2',
+        [hItem.quantity, hItem.hardware_product_id]
+      );
+    }
+
     await client.query('COMMIT');
-    res.status(201).json({ order, items: resolvedItems });
+    res.status(201).json({ order, items: resolvedItems, hardware_items: resolvedHardwareItems });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error(err);
@@ -110,8 +170,6 @@ async function create(req, res) {
 }
 
 async function list(req, res) {
-  // Par défaut, l'historique masqué (archivé) n'apparaît pas dans la liste
-  // principale. ?archived=true permet de consulter les commandes masquées.
   const showArchived = req.query.archived === 'true';
 
   try {
@@ -119,8 +177,11 @@ async function list(req, res) {
       SELECT o.*, c.full_name AS customer_name, c.phone, c.address,
              COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.order_id = o.id), 0) AS total_paid,
              (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id) AS item_count,
+             (SELECT COUNT(*) FROM order_hardware_items ohi WHERE ohi.order_id = o.id) AS hardware_item_count,
              (SELECT string_agg(g.name, ', ') FROM order_items oi
-                JOIN glass_types g ON g.id = oi.glass_type_id WHERE oi.order_id = o.id) AS glass_names
+                JOIN glass_types g ON g.id = oi.glass_type_id WHERE oi.order_id = o.id) AS glass_names,
+             (SELECT string_agg(hp.name, ', ') FROM order_hardware_items ohi
+                JOIN hardware_products hp ON hp.id = ohi.hardware_product_id WHERE ohi.order_id = o.id) AS hardware_names
       FROM orders o
       JOIN customers c ON c.id = o.customer_id
       WHERE o.archived = $1
@@ -156,11 +217,19 @@ async function getById(req, res) {
       ORDER BY oi.id ASC
     `, [id]);
 
+    const hardwareItems = await pool.query(`
+      SELECT ohi.*, hp.name AS hardware_name, hp.reference AS hardware_reference
+      FROM order_hardware_items ohi
+      JOIN hardware_products hp ON hp.id = ohi.hardware_product_id
+      WHERE ohi.order_id = $1
+      ORDER BY ohi.id ASC
+    `, [id]);
+
     const payments = await pool.query(
       'SELECT * FROM payments WHERE order_id = $1 ORDER BY created_at ASC', [id]
     );
 
-    res.json({ order: result.rows[0], items: items.rows, payments: payments.rows });
+    res.json({ order: result.rows[0], items: items.rows, hardware_items: hardwareItems.rows, payments: payments.rows });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Erreur lors du chargement de la commande.' });
@@ -201,9 +270,35 @@ async function updateStatus(req, res) {
       refundedAmount = Number(paidResult.rows[0].total_paid);
 
       await client.query('DELETE FROM payments WHERE order_id = $1', [id]);
+
+      // Restituer le stock des produits de quincaillerie de la commande.
+      const hwResult = await client.query(
+        'SELECT hardware_product_id, quantity FROM order_hardware_items WHERE order_id = $1',
+        [id]
+      );
+      for (const hw of hwResult.rows) {
+        await client.query(
+          'UPDATE hardware_products SET stock_quantity = stock_quantity + $1, updated_at = NOW() WHERE id = $2',
+          [Number(hw.quantity), hw.hardware_product_id]
+        );
+      }
     }
 
     const paymentStatus = status === 'annule' ? 'non_paye' : existing.payment_status;
+
+    // Réactivation d'une commande annulée : on redécrémente le stock.
+    if (existing.status === 'annule' && status !== 'annule') {
+      const hwResult = await client.query(
+        'SELECT hardware_product_id, quantity FROM order_hardware_items WHERE order_id = $1',
+        [id]
+      );
+      for (const hw of hwResult.rows) {
+        await client.query(
+          'UPDATE hardware_products SET stock_quantity = stock_quantity - $1, updated_at = NOW() WHERE id = $2',
+          [Number(hw.quantity), hw.hardware_product_id]
+        );
+      }
+    }
 
     const result = await client.query(
       'UPDATE orders SET status = $1, payment_status = $2, updated_at = NOW() WHERE id = $3 RETURNING *',
@@ -254,7 +349,7 @@ async function remove(req, res) {
   try {
     await client.query('BEGIN');
 
-    const existing = await client.query('SELECT id FROM orders WHERE id = $1', [id]);
+    const existing = await client.query('SELECT id, status FROM orders WHERE id = $1', [id]);
     if (existing.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Commande introuvable.' });
@@ -262,6 +357,22 @@ async function remove(req, res) {
 
     await client.query('DELETE FROM invoices WHERE order_id = $1', [id]);
     await client.query('DELETE FROM payments WHERE order_id = $1', [id]);
+
+    // Restituer le stock de quincaillerie avant suppression (sauf si la
+    // commande était déjà annulée : le stock a déjà été restitué à ce moment).
+    if (existing.rows[0].status !== 'annule') {
+      const hwResult = await client.query(
+        'SELECT hardware_product_id, quantity FROM order_hardware_items WHERE order_id = $1',
+        [id]
+      );
+      for (const hw of hwResult.rows) {
+        await client.query(
+          'UPDATE hardware_products SET stock_quantity = stock_quantity + $1, updated_at = NOW() WHERE id = $2',
+          [Number(hw.quantity), hw.hardware_product_id]
+        );
+      }
+    }
+
     await client.query('DELETE FROM orders WHERE id = $1', [id]);
 
     await client.query('COMMIT');
